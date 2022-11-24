@@ -1,0 +1,14 @@
+Q:Looking at the backtrace output, which function called syscall?
+A:usertrap() called syscall.
+
+Q:What is the value of p->trapframe->a7 and what does that value represent? (Hint: look user/initcode.S, the first user program xv6 starts.)
+A:p->trapframe->a7 is 7, which is the syscall number of SYS_exec set by initcode.S
+
+Q:What was the previous mode that the CPU was in?
+A:User mode, as sstatus[8] is 0. See RISC-V Privileged Architecture 4.1.1.
+
+Q:Why does the kernel crash? Hint: look at figure 3-3 in the text; is address 0 mapped in the kernel address space? Is that confirmed by the value in scause above? (See description of scause in RISC-V privileged instructions)
+A:This instruction try to load data from 0x0, which is unmapped. We are assure that because scause=0xd, see RISC-V Privileged Architecture 4.1.8.
+
+Q:What is the name of the binary that was running when the kernel paniced? What is its process id (pid)?
+A:Name is empty string, pid is 0.
