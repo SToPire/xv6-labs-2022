@@ -1,0 +1,11 @@
+Q:Which other xv6 system call(s) could be made faster using this shared page? Explain how.
+A:Maybe uptime() could, if only kernel maintains `tick` in each process's shared page. But was it worth it?
+
+Q:Explain the output of vmprint in terms of Fig 3-4 from the text. What does page 0 contain? What is in page 2?
+A:Page 0 is user code as its flag is PTE_R|PTE_X|PTE_U. Page 2 is guard page as it doesn't have a PTE_U flag.
+
+Q:When running in user mode, could the process read/write the memory mapped by page 1?
+A:Of course, it has PTE_R|PTE_W|PTE_U.
+
+Q:What does the third to last page contain?
+A:It's a usyscall page, with flag PTE_R|PTE_U.
