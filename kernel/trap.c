@@ -29,6 +29,49 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+void
+cow_pf_handler()
+{
+  uint64 va, pa, flags;
+  pte_t *pte;
+  struct proc *p = myproc();
+  void *new_pa;
+
+  va = PGROUNDDOWN(r_stval());
+  if ((pte = walk(p->pagetable, va, 0)) == 0) {
+    setkilled(p);
+    return;
+  }
+
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+
+  if (flags & PTE_COW && (flags & PTE_W) == 0) {
+    if (dec_refcount_if_shared(pa)) {
+      /* The page's reference count is 1, just change the perm */
+      *pte |= PTE_W;
+      *pte &= ~PTE_COW;
+      return;
+    }
+    if ((new_pa = kalloc()) == 0) {
+      setkilled(p);
+      return;
+    }
+
+    memmove(new_pa, (void *)pa, PGSIZE);
+    /* unmap shared physical page from address space
+     * DO NOT decreate reference count, as it has been decreased in
+     * `dec_refcount_if_shared()`
+     */
+    uvmunmap(p->pagetable, va, 1, 0);
+    /* map new physical page, clear PTE_COW bit, set PTE_W bit */
+    mappages(p->pagetable, va, PGSIZE, (uint64)new_pa,
+             (flags & ~PTE_COW) | PTE_W);
+  } else {
+    setkilled(p);
+  }
+}
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -37,6 +80,7 @@ void
 usertrap(void)
 {
   int which_dev = 0;
+  uint64 scause;
 
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
@@ -50,7 +94,8 @@ usertrap(void)
   // save user program counter.
   p->trapframe->epc = r_sepc();
   
-  if(r_scause() == 8){
+  scause = r_scause();
+  if(scause == 8){
     // system call
 
     if(killed(p))
@@ -65,6 +110,8 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if (scause == SCAUSE_STORE_PF) {
+    cow_pf_handler();
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

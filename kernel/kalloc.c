@@ -23,10 +23,17 @@ struct {
   struct run *freelist;
 } kmem;
 
+struct {
+  struct spinlock lock;
+  uint8 ref_count[PHYSTOP >> PGSHIFT];
+} page_ref_count;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&page_ref_count.lock, "pgref");
+  memset(page_ref_count.ref_count, 0, PHYSTOP >> PGSHIFT);
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -34,9 +41,18 @@ void
 freerange(void *pa_start, void *pa_end)
 {
   char *p;
+  struct run *r;
+
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
-    kfree(p);
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+    memset(p, 1, PGSIZE);
+    r = (struct run *)p;
+
+    acquire(&kmem.lock);
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+    release(&kmem.lock);
+  }
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -50,6 +66,13 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  acquire(&page_ref_count.lock);
+  if (--page_ref_count.ref_count[(uint64)pa >> PGSHIFT] != 0) {
+    release(&page_ref_count.lock);
+    return;
+  }
+  release(&page_ref_count.lock);
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -72,11 +95,40 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r) {
     kmem.freelist = r->next;
+    acquire(&page_ref_count.lock);
+    page_ref_count.ref_count[(uint64)r >> PGSHIFT] = 1;
+    release(&page_ref_count.lock);
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+void
+inc_refcount(uint64 pa) {
+  acquire(&page_ref_count.lock);
+  page_ref_count.ref_count[pa >> PGSHIFT]++;
+  release(&page_ref_count.lock);
+}
+
+/* Do the following steps atomically:
+ *  1. if page's reference count is 1(e.g., not shared), return true. 
+ *  2. else, decrease page's reference count, return false.
+ */
+int
+dec_refcount_if_shared(uint64 pa) {
+  acquire(&page_ref_count.lock);
+  uint8 ret = page_ref_count.ref_count[pa >> PGSHIFT];
+  if (ret != 1) {
+    --page_ref_count.ref_count[pa >> PGSHIFT];
+    ret = 0;
+  } else {
+    ret = 1;
+  }
+  release(&page_ref_count.lock);
+  return ret;
 }
