@@ -1,0 +1,8 @@
+Q:Why are there missing keys with 2 threads, but not with 1 thread? Identify a sequence of events with 2 threads that can lead to a key being missing. 
+A:List operation is not thread safe. If two threads want to insert into the same list with the same n:
+    T1: e1->next = n
+                            T2: e2->next = n
+                            T2: *p = e2;
+    T1: *p = e1;
+
+    e2 is lost.
