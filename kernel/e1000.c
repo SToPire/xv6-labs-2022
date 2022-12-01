@@ -102,7 +102,42 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+
+  acquire(&e1000_lock);
+  /* tail should be the first free tx_desc */
+  uint8 tail = regs[E1000_TDT];
+  if ((tx_ring[tail].status & E1000_TXD_STAT_DD) == 0) {
+    /* if tail is not free, it must be a wrap around of tx_ring,
+     * which means the transmit FIFO is full, return error
+     */
+    release(&e1000_lock);
+    return -1;
+  }
+
+  /* mbuf must be freed after transmission
+   * we free old mbuf when new mbuf wants to use the same index
+   * then, tx_mbufs[tail] should point to new mbuf
+   */
+  if (tx_mbufs[tail]) {
+    mbuffree(tx_mbufs[tail]);
+    tx_mbufs[tail] = 0;
+  }
+  tx_mbufs[tail] = m;
+
+  /* tell tx_desc packet's memory location for DMA */
+  tx_ring[tail].addr = (uint64)m->head;
+  tx_ring[tail].length = m->len;
+  tx_ring[tail].css = tx_ring[tail].cso = tx_ring[tail].special = 0;
+
+  /* we send one packet as a whole at a time, so EOP must be set 
+   * we want to know E1000_TXD_STAT_DD, so RS must be set
+   */
+  tx_ring[tail].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+
+  /* give new tx_desc to e1000, it will eventually send the packet */
+  regs[E1000_TDT] = (tail + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,6 +150,29 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  uint8 tail = regs[E1000_RDT];
+  /* tail + 1 is the first received packet */
+  tail = (tail + 1) % RX_RING_SIZE;
+
+  /* E1000_RXD_STAT_DD means hardware handling is done, and the packet is in
+   * memory now */
+  while (rx_ring[tail].status & E1000_RXD_STAT_DD) {
+    rx_mbufs[tail]->len = rx_ring[tail].length;
+
+    /* give the packet to network stack */
+    net_rx(rx_mbufs[tail]);
+    /* network stack will mbuffree old packet */
+
+    /* allocate a new mbuf, and give it to rx_ring as a DMA target */
+    rx_mbufs[tail] = mbufalloc(0);
+    rx_ring[tail].addr = (uint64)rx_mbufs[tail]->head;
+    /* status must be clear manually! */
+    rx_ring[tail].status = 0;
+
+    /* we are the consumer, update RDT */
+    regs[E1000_RDT] = tail;
+    tail = (tail + 1) % RX_RING_SIZE;
+  }
 }
 
 void
