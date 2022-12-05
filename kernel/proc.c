@@ -310,6 +310,19 @@ fork(void)
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
+  /* copy vma struct */
+  for (i = 0; i < 16; i++) {
+    if (p->vma[i].vaddr) {
+      np->vma[i].vaddr = p->vma[i].vaddr;
+      np->vma[i].size = p->vma[i].size;
+      np->vma[i].fp = p->vma[i].fp;
+      np->vma[i].prot = p->vma[i].prot;
+      np->vma[i].flags = p->vma[i].flags;
+      
+      filedup(np->vma[i].fp);
+    }
+  }
+
   pid = np->pid;
 
   release(&np->lock);
@@ -357,6 +370,16 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  /* unmap all mmap regions */
+  for (int i = 0; i < 16; i++) {
+    if (p->vma[i].vaddr) {
+      if (do_munmap(p->vma[i].vaddr, p->vma[i].size) < 0) {
+        panic("do_munmap fail");
+      }
+      memset(&p->vma[i], 0, sizeof(struct vm_struct));
     }
   }
 

@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -502,4 +503,130 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  /* In this lab, addr and offset are always 0! */
+  int length;
+  int prot;
+  int flags;
+  struct file* fp;
+  struct proc *p = myproc();
+
+  argint(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  argfd(4, (void *)0, &fp);
+
+  /* Can not readably mmap a non-readable file 
+   * Can not writeably mmap a read-only file with MAP_SHARED
+   */
+  if ((!fp->readable && prot & PROT_READ) ||
+      (!fp->writable && prot & PROT_WRITE && flags & MAP_SHARED)) {
+    return -1;
+  }
+
+  for (int i = 0; i < 16; i++) {
+    if (p->vma[i].vaddr == 0) {
+      p->vma[i].fp = fp;
+      p->vma[i].prot = prot;
+      p->vma[i].flags = flags;
+      p->vma[i].size = length;
+      /* mmap a 1GB vm region for simplicity */
+      p->vma[i].vaddr = MMAPBASE + i * 1024UL * 1024 * 1024;
+
+      /* Increase file's ref count */
+      filedup(fp);
+
+      return p->vma[i].vaddr;
+    }
+  }
+
+  return -1;
+}
+
+/* write back a page of ip, see filewrite() */
+int wb_page(struct inode *ip, uint64 offset, uint64 pa) {
+  /* xv6 fs log has this limit, so we can not writei a whole page at a time */
+  int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+  begin_op();
+  ilock(ip);
+  if (writei(ip, 0, pa, offset, max) < 0) {
+    return -1;
+  }
+  iunlock(ip);
+  end_op();
+
+  begin_op();
+  ilock(ip);
+  if (writei(ip, 0, pa, offset + max, PGSIZE - max) < 0) {
+    return -1;
+  }
+  iunlock(ip);
+  end_op();
+
+  return 0;
+}
+
+uint64
+do_munmap(uint64 va, int length)
+{
+  uint64 pa;
+  pte_t *pte;
+  struct vm_struct *vma;
+  struct proc *p = myproc();
+
+  for (int i = 0; i < 16; i++) {
+    vma = &p->vma[i];
+    /* In this lab, munmap() only handles these 2 cases. 
+     * It will not free in the middle of a vma.
+     */
+    if (vma->vaddr == va ||
+        vma->vaddr + vma->size == va + length) {
+      for (uint64 page = va; page != va + length; page += PGSIZE) {
+        if ((pte = walk(p->pagetable, page, 0)) == 0) {
+          return -1;
+        }
+        pa = PTE2PA(*pte);
+        /* In shared mmap, dirty pages shoule be write back to file. */
+        if (vma->flags & MAP_SHARED && PTE_FLAGS(*pte) & PTE_D) {
+          if (wb_page(vma->fp->ip, page - vma->vaddr, pa) < 0) {
+            return -1;
+          }
+        }
+        /* The physical page does not necessarily exist because of lazy allocation. */
+        if (pa) {
+          uvmunmap(p->pagetable, page, 1, 1);
+        }
+      }
+
+      if (vma->vaddr == va) {
+        vma->vaddr = va + length;
+      }
+      vma->size -= length;
+      /* The whole vma has been freed, decrease file reference count and clean vm_struct. */
+      if (vma->size == 0) {
+        fileclose(vma->fp);
+        memset(vma, 0, sizeof(struct vm_struct));
+      }
+
+      return 0;
+    }
+  }
+
+  return -1;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 va;
+  int length;
+
+  argaddr(0, &va);
+  argint(1, &length);
+
+  return do_munmap(va, length);
 }

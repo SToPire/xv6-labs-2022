@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -29,6 +33,66 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+void mmap_pf_handler(uint64 scause) {
+  uint64 va;
+  void *pa;
+  int rwflag = 0;
+  int i;
+  int actual_size;
+  struct proc *p = myproc();
+  struct vm_struct *vma;
+  struct inode *ip;
+
+  va = PGROUNDDOWN(r_stval());
+
+  /* find vm_struct which page fault address belongs to */
+  for (i = 0; i < 16; i++) {
+    vma = &p->vma[i];
+    if (vma->vaddr <= va && vma->vaddr + vma->size > va) {
+      break;
+    }
+  }
+
+  /* not a mmap page fault, or wrong permission */
+  if ((i == 16) || (scause == SCAUSE_LOAD_PF && !(vma->prot & PROT_READ)) ||
+      (scause == SCAUSE_STORE_PF && !(vma->prot & PROT_WRITE))) {
+    goto bad;
+  }
+
+  if ((pa = kalloc()) == 0) {
+    goto bad;
+  }
+
+  ip = vma->fp->ip;
+  ilock(ip);
+  actual_size = readi(ip, 0, (uint64)pa, va - vma->vaddr, PGSIZE);
+  if (actual_size < 0) {
+    iunlock(ip);
+    goto bad;
+  } else if (actual_size != PGSIZE) {
+    /* file content could not fill the whole page, we need to fill zero */
+    memset(pa + actual_size, 0, PGSIZE - actual_size);
+  }
+  iunlock(ip);
+
+  if (vma->prot & PROT_READ) {
+    rwflag |= PTE_R;
+  }
+  if (vma->prot & PROT_WRITE) {
+    rwflag |= PTE_W;
+  }
+
+  if (mappages(p->pagetable, va, PGSIZE, (uint64)pa, PTE_U | rwflag) < 0) {
+    goto bad;
+  }
+
+  return;
+
+bad:
+  setkilled(p);
+  return;
+}
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -37,6 +101,7 @@ void
 usertrap(void)
 {
   int which_dev = 0;
+  uint64 scause;
 
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
@@ -50,7 +115,8 @@ usertrap(void)
   // save user program counter.
   p->trapframe->epc = r_sepc();
   
-  if(r_scause() == 8){
+  scause = r_scause();
+  if(scause == 8){
     // system call
 
     if(killed(p))
@@ -67,6 +133,8 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(scause == SCAUSE_LOAD_PF || scause == SCAUSE_STORE_PF) {
+    mmap_pf_handler(scause);
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
