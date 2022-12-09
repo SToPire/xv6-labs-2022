@@ -116,7 +116,7 @@ inc_refcount(uint64 pa) {
 }
 
 /* Do the following steps atomically:
- *  1. if page's reference count is 1(e.g., not shared), return true. 
+ *  1. if page's reference count is 1(i.e., not shared), return true. 
  *  2. else, decrease page's reference count, return false.
  */
 int
